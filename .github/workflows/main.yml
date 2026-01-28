@@ -62,6 +62,27 @@ jobs:
           output: ${{ github.workspace }}/codeql-results
           category: codeql
 
+      - name: Install sarif-tools
+        run: pip install sarif-tools
+
+      - name: Generate HTML Report
+        run: |
+          SARIF_FILE=$(find ${{ github.workspace }}/codeql-results -name "*.sarif" | head -n 1)
+          if [ -n "$SARIF_FILE" ]; then
+            echo "Converting $SARIF_FILE to HTML..."
+            sarif html "$SARIF_FILE" --output codeql-report.html
+          else
+            echo "No SARIF file found!"
+            exit 1
+          fi
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-html-report
+          path: codeql-report.html
+
       - name: Upload CodeQL report (SARIF artifact)
         if: always()
         uses: actions/upload-artifact@v4
