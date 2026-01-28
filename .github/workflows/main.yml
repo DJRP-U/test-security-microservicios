@@ -1,0 +1,221 @@
+name: 01 - Main CI / CD Pipeline
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.txt"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "**/*.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  checks: write
+  pull-requests: write
+  actions: read
+  security-events: write
+  packages: write
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+
+  codeql-analysis:
+    name: CodeQL (SAST)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: servicioCuenta/package-lock.json
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      # Autobuild usually works for JS, but we can explicitly skip build steps for interpreted languages
+      # or just let CodeQL handle it. Removing manual Maven build.
+
+
+      - name: Perform CodeQL Analysis (generate SARIF)
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: ${{ github.workspace }}/codeql-results
+          category: codeql
+
+      - name: Upload CodeQL report (SARIF artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+          path: ${{ github.workspace }}/codeql-results/**/*.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: CodeQL summary (counts by severity)
+        if: always()
+        run: |
+          python - <<'PY'
+          import glob, json, os
+          out = ["### CodeQL - Resumen"]
+          files = glob.glob("codeql-results/**/*.sarif", recursive=True)
+          if not files:
+            out.append("- No se encontraron SARIF en codeql-results/**")
+          else:
+            sev = {"error":0,"warning":0,"note":0}
+            for f in files:
+              data = json.load(open(f, encoding="utf-8"))
+              for run in data.get("runs", []):
+                for r in run.get("results", []):
+                  lvl = (r.get("level") or "note").lower()
+                  if lvl not in sev: lvl = "note"
+                  sev[lvl] += 1
+            out.append(f"- error: {sev['error']}")
+            out.append(f"- warning: {sev['warning']}")
+            out.append(f"- note: {sev['note']}")
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+          PY
+
+  zap-dast:
+    name: OWASP ZAP (DAST)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      issues: write
+
+    env:
+      APP_PORT: "8001"
+      ZAP_TARGET_URL: http://127.0.0.1:8001/
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: servicioCuenta/package-lock.json
+
+      - name: Install dependencies
+        working-directory: servicioCuenta
+        run: npm ci
+
+      - name: Start app (background)
+        working-directory: servicioCuenta
+        run: |
+          echo "Starting Node app on port $APP_PORT"
+          PORT=$APP_PORT nohup npm start > ../app.log 2>&1 &
+          echo $! > ../app.pid
+
+      - name: Wait until app is ready
+        run: |
+          set -e
+          for i in {1..60}; do
+            if curl -fsS "$ZAP_TARGET_URL" >/dev/null; then
+              echo "App OK: $ZAP_TARGET_URL"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERROR: la app no respondió en $ZAP_TARGET_URL"
+          echo "---- app.log ----"
+          tail -n 200 app.log || true
+          exit 1
+
+      - name: ZAP Full Scan (debug log)
+        uses: zaproxy/action-full-scan@v0.13.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          target: ${{ env.ZAP_TARGET_URL }}
+          artifact_name: zap_dast
+          cmd_options: >-
+            -d
+            -j
+            -J zap_report.json
+            -w zap_report.md
+            -r zap_report.html
+            -x zap_report.xml
+
+      - name: Upload app log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Security findings summary (XSS/CSRF/SQLi/…)
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          path = "zap_report.json"
+          out = ["### OWASP ZAP - Hallazgos relevantes (XSS/CSRF/SQLi/…)"]
+          if not os.path.exists(path):
+            out.append("- No se encontró zap_report.json (revisa el artifact zap_dast).")
+            open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+            raise SystemExit(0)
+
+          data = json.load(open(path, encoding="utf-8"))
+
+          alerts = []
+          def walk(o):
+            if isinstance(o, dict):
+              if isinstance(o.get("alerts"), list):
+                alerts.extend(o["alerts"])
+              for v in o.values(): walk(v)
+            elif isinstance(o, list):
+              for v in o: walk(v)
+          walk(data)
+
+          keys = (
+            "xss","cross site scripting","csrf",
+            "sql injection","sqli","xxe",
+            "open redirect","path traversal","command injection"
+          )
+
+          hits = []
+          for a in alerts:
+            name = (a.get("name") or a.get("alert") or "").strip()
+            risk = (a.get("riskdesc") or a.get("risk") or "").strip()
+            if name and any(k in name.lower() for k in keys):
+              hits.append((name, risk))
+
+          if not hits:
+            out.append("- Sin coincidencias en este filtro. Revisa el reporte completo (artifact zap_dast).")
+          else:
+            for n, r in hits[:50]:
+              out.append(f"- {n} — {r}")
+
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(out) + "\n")
+          PY
+
+      - name: Stop app
+        if: always()
+        run: |
+          if [ -f app.pid ]; then
+            kill "$(cat app.pid)" || true
+          fi
