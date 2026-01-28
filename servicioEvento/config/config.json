@@ -1,0 +1,11 @@
+{
+    "development": {
+        "username": "prueba2",
+        "password": "prueba2",
+        "database": "prueba2",
+        "host": "bd_2",
+        "port": 3306,
+        "dialect": "mysql",
+        "operatorAliases": false
+    }
+}
