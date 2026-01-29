@@ -26,6 +26,30 @@ jobs:
     uses: ./.github/workflows/build.yml
     secrets: inherit
 
+  license-compliance:
+    name: License Compliance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies and Check Licenses
+        working-directory: servicioCuenta
+        run: |
+          npm ci
+          # Check for GPL licenses which might be viral and restrict usage
+          # User can adjust the failOn list as needed
+          npx license-checker --summary --failOn "GPL"
+
   codeql-analysis:
     name: CodeQL (SAST)
     runs-on: ubuntu-latest
@@ -65,14 +89,37 @@ jobs:
       - name: Install sarif-tools
         run: pip install sarif-tools
 
+      - name: Debug - List files
+        run: ls -R ${{ github.workspace }}
+
       - name: Generate HTML Report
         run: |
+          echo "Looking for SARIF files..."
+          find ${{ github.workspace }} -name "*.sarif"
+          
+          # Try to find the SARIF file in the expected location first
           SARIF_FILE=$(find ${{ github.workspace }}/codeql-results -name "*.sarif" | head -n 1)
+          
+          # Fallback search if not found in codeql-results
+          if [ -z "$SARIF_FILE" ]; then
+             echo "Warning: No SARIF found in codeql-results. Searching recursively..."
+             SARIF_FILE=$(find ${{ github.workspace }} -name "*.sarif" | head -n 1)
+          fi
+
           if [ -n "$SARIF_FILE" ]; then
-            echo "Converting $SARIF_FILE to HTML..."
+            echo "Found SARIF file: $SARIF_FILE"
+            echo "Converting to HTML..."
             sarif html "$SARIF_FILE" --output codeql-report.html
+            
+            if [ -f "codeql-report.html" ]; then
+                echo "Report generated successfully."
+                ls -l codeql-report.html
+            else
+                echo "Error: sarif-tools command finished but codeql-report.html was not created."
+                exit 1
+            fi
           else
-            echo "No SARIF file found!"
+            echo "Error: No SARIF file found anywhere in the workspace!"
             exit 1
           fi
 
