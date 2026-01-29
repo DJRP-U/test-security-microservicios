@@ -226,6 +226,14 @@ jobs:
             -r zap_report.html
             -x zap_report.xml
 
+      - name: Upload ZAP HTML Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-html-report
+          path: zap_report.html
+
+
       - name: Upload app log
         if: always()
         uses: actions/upload-artifact@v4
